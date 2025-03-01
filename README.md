@@ -1,4 +1,5 @@
-> **_NOTE:_**  This package was modified to run Nix-Bitcoin on a OnePlus 6.
+> [!NOTE]  
+> This package was modified to run Nix-Bitcoin on a OnePlus 6.
 
 # fastboot.js
 
@@ -46,7 +47,7 @@ To link this project to another local instance, you can use the following steps:
     cd /path/to/target/project
     npm install --save /path/to/this/fork/fastboot.js 
     ```
-    
+
 ## Development
 
 To install Yarn, you can use the following command:
