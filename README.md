@@ -1,3 +1,5 @@
+> **_NOTE:_**  This package was modified to run Nix-Bitcoin on a Pixel 6.
+
 # fastboot.js
 
 fastboot.js is an implementation of the Android [fastboot](https://android.googlesource.com/platform/system/core/+/master/fastboot/README.md) protocol in JavaScript. It runs in web browsers by using the [WebUSB](https://wicg.github.io/webusb/) API, which is currently supported by Chrome.
@@ -24,7 +26,7 @@ The following fastboot features are supported:
 
 Detailed progress callbacks are also provided for many flashing steps.
 
-## Installation
+## Installation (This is for Kdrag0n version)
 
 This library is available as a [package](https://www.npmjs.com/package/android-fastboot) on npm, so you can easily add it to your project:
 
@@ -36,6 +38,23 @@ npm install --save android-fastboot
 yarn add android-fastboot
 ```
 
+## Development
+
+To install Yarn, you can use the following command:
+
+```sh
+npm install -g yarn
+```
+
+To install project dependencies using Yarn, navigate to your project directory and run:
+
+```sh
+yarn install
+```
+
+### Link
+
+To link this proyect to a another local instance
 ## Examples
 
 A basic demo of fastboot.js can be found [here](https://kdrag0n.github.io/fastboot.js/demo/). The source code is included [in this repository](https://github.com/kdrag0n/fastboot.js/tree/master/demo).

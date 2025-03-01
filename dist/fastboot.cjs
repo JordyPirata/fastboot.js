@@ -7959,6 +7959,7 @@ const SYSTEM_IMAGES = [
     "odm",
     "odm_dlkm",
     "product",
+    "system_dlkm",
     "system_ext",
     "system",
     "vendor_dlkm",
@@ -8451,7 +8452,7 @@ class FastbootDevice {
             let resp = (await this.getVariable("max-download-size")).toLowerCase();
             if (resp) {
                 // AOSP fastboot requires hex
-                return Math.min(parseInt(resp, 16), MAX_DOWNLOAD_SIZE);
+                return Math.min(parseInt(resp, 10), MAX_DOWNLOAD_SIZE);
             }
         }
         catch (error) {
