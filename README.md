@@ -1,4 +1,4 @@
-> **_NOTE:_**  This package was modified to run Nix-Bitcoin on a Pixel 6.
+> **_NOTE:_**  This package was modified to run Nix-Bitcoin on a OnePlus 6.
 
 # fastboot.js
 
@@ -52,9 +52,22 @@ To install project dependencies using Yarn, navigate to your project directory a
 yarn install
 ```
 
-### Link
+Build the project to generate the dist files:
 
-To link this proyect to a another local instance
+```sh
+yarn run build
+```
+
+## Installation (This version)
+
+To link this project to another local instance, you can use the following steps:
+
+1. Insatall the dist files to the target project:
+    ```sh
+    cd /path/to/target/project
+    npm install --save /path/to/this/fork/fastboot.js 
+    ```
+
 ## Examples
 
 A basic demo of fastboot.js can be found [here](https://kdrag0n.github.io/fastboot.js/demo/). The source code is included [in this repository](https://github.com/kdrag0n/fastboot.js/tree/master/demo).
