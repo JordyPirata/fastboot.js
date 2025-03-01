@@ -37,7 +37,16 @@ npm install --save android-fastboot
 # Using yarn
 yarn add android-fastboot
 ```
+## Installation (This version)
 
+To link this project to another local instance, you can use the following steps:
+
+1. Insatall the dist files to the target project:
+    ```sh
+    cd /path/to/target/project
+    npm install --save /path/to/this/fork/fastboot.js 
+    ```
+    
 ## Development
 
 To install Yarn, you can use the following command:
@@ -57,16 +66,6 @@ Build the project to generate the dist files:
 ```sh
 yarn run build
 ```
-
-## Installation (This version)
-
-To link this project to another local instance, you can use the following steps:
-
-1. Insatall the dist files to the target project:
-    ```sh
-    cd /path/to/target/project
-    npm install --save /path/to/this/fork/fastboot.js 
-    ```
 
 ## Examples
 
