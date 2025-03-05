@@ -2,6 +2,8 @@
 
 Object.defineProperty(exports, '__esModule', { value: true });
 
+require('zip.js');
+
 let debugLevel = false;
 
 function logDebug(...data) {
@@ -130,9 +132,6 @@ const MAJOR_VERSION = 1;
 const MINOR_VERSION = 0;
 const FILE_HEADER_SIZE = 28;
 const CHUNK_HEADER_SIZE = 12;
-
-// AOSP libsparse uses 64 MiB chunks
-const RAW_CHUNK_SIZE = 64 * 1024 * 1024;
 
 const CHUNK_TYPE_RAW = 0xcac1;
 const CHUNK_TYPE_FILL = 0xcac2;
@@ -282,50 +281,6 @@ function createImage(header, chunks) {
     }
 
     return buffer;
-}
-
-/**
- * Checks whether the given buffer is a valid sparse image.
- *
- * @param {ArrayBuffer} buffer - Buffer containing the data to check.
- * @returns {valid} Whether the buffer is a valid sparse image.
- */
-function isSparse(buffer) {
-    try {
-        let header = parseFileHeader(buffer);
-        return header !== null;
-    } catch (error) {
-        // ImageError = invalid
-        return false;
-    }
-}
-
-/**
- * Creates a sparse image from buffer containing raw image data.
- *
- * @param {ArrayBuffer} rawBuffer - Buffer containing the raw image data.
- * @returns {sparseBuffer} Buffer containing the new sparse image.
- */
-function fromRaw(rawBuffer) {
-    let header = {
-        blockSize: 4096,
-        blocks: rawBuffer.byteLength / 4096,
-        chunks: 1,
-        crc32: 0,
-    };
-
-    let chunks = [];
-    while (rawBuffer.byteLength > 0) {
-        let chunkSize = Math.min(rawBuffer.byteLength, RAW_CHUNK_SIZE);
-        chunks.push({
-            type: "raw",
-            blocks: chunkSize / header.blockSize,
-            data: rawBuffer.slice(0, chunkSize),
-        });
-        rawBuffer = rawBuffer.slice(chunkSize);
-    }
-
-    return createImage(header, chunks);
 }
 
 /**
@@ -3043,6 +2998,216 @@ async function flashZip(
     }
 }
 
+/*!
+ * xzwasm (c) Steve Sanderson. License: MIT - https://github.com/SteveSanderson/xzwasm
+ * Contains xz-embedded by Lasse Collin and Igor Pavlov. License: Public domain - https://tukaani.org/xz/embedded.html
+ * and walloc (c) 2020 Igalia, S.L. License: MIT - https://github.com/wingo/walloc
+ */
+(function webpackUniversalModuleDefinition(root, factory) {
+	if(typeof exports === 'object' && typeof module === 'object')
+		module.exports = factory();
+	else if(typeof define === 'function' && define.amd)
+		define([], factory);
+	else if(typeof exports === 'object')
+		exports["xzwasm"] = factory();
+	else
+		root["xzwasm"] = factory();
+})(self, function() {
+return /******/ (() => { // webpackBootstrap
+/******/ 	var __webpack_modules__ = ([
+/* 0 */,
+/* 1 */
+/***/ ((module) => {
+
+module.exports = "data:application/wasm;base64,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AUYNACACRQ0AA0ACQCAALQAAIgMgAS0AACIERg0AQQFBfyADIARLGw8LIAFBAWohASAAQQFqIQAgAkF/aiICDQALC0EAC3gBAX8CQAJAIAAgAU8NACACRQ0BIAAhAwNAIAMgAS0AADoAACABQQFqIQEgA0EBaiEDIAJBf2oiAg0ADAILCyAAIAFNDQAgAkUNACABQX9qIQEgAEF/aiEDA0AgAyACaiABIAJqLQAAOgAAIAJBf2oiAg0ACwsgAAssAQF/AkAgAkUNACAAIQMDQCADIAE6AAAgA0EBaiEDIAJBf2oiAg0ACwsgAAt+AQF/AkACQCAAQQNxDQAgASACckEDcQ0AIAJBAnYiAkUNASAAIQMDQCADIAEoAgA2AgAgAUEEaiEBIANBBGohAyACQX9qIgINAAwCCwsgAkUNACAAIQMDQCADIAEtAAA6AAAgAUEBaiEBIANBAWohAyACQX9qIgINAAsLIAALfwECfwJAQQAtAOiIgIAADQBBAEEBOgDoiICAABCMgICAABCOgICAAAtBoIAIEICAgIAAIgBBgIAENgIAQQJBgICAIBCUgICAACEBIABCgICAgICAwAA3AhQgACAAQaCABGo2AhAgAEIANwIIIAAgAEEgajYCBCAAIAE2AhwgAAsVACAAKAIcEJWAgIAAIAAQgoCAgAALFgAgAEEMaiABNgIAIABBCGpBADYCAAsbACAAKAIcIABBBGogAEEMaigCAEUQk4CAgAALVAEDf0EAIQADQEEIIQEgACECA0BBACACQQFxa0GghuLtfnEgAkEBdnMhAiABQX9qIgENAAsgAEECdEHwiICAAGogAjYCACAAQQFqIgBBgAJHDQALC0oAIAJBf3MhAgJAIAFFDQADQCACQf8BcSAALQAAc0ECdEHwiICAAGooAgAgAkEIdnMhAiAAQQFqIQAgAUF/aiIBDQALCyACQX9zC2kEAX8BfgF/AX5BACEAQgAhAQNAQQghAiABIQMDQEIAIANCAYN9QsKenLzd8pW2SYMgA0IBiIUhAyACQX9qIgINAAsgAEEDdEHwkICAAGogAzcDACAAQQFqIQAgAUIBfCIBQoACUg0ACwtLACACQn+FIQICQCABRQ0AA0AgAkL/AYMgADEAAIWnQQN0QfCQgIAAaikDACACQgiIhSECIABBAWohACABQX9qIgENAAsL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";
+
+/***/ })
+/******/ 	]);
+/************************************************************************/
+/******/ 	// The module cache
+/******/ 	var __webpack_module_cache__ = {};
+/******/ 	
+/******/ 	// The require function
+/******/ 	function __webpack_require__(moduleId) {
+/******/ 		// Check if module is in cache
+/******/ 		var cachedModule = __webpack_module_cache__[moduleId];
+/******/ 		if (cachedModule !== undefined) {
+/******/ 			return cachedModule.exports;
+/******/ 		}
+/******/ 		// Create a new module (and put it into the cache)
+/******/ 		var module = __webpack_module_cache__[moduleId] = {
+/******/ 			// no module.id needed
+/******/ 			// no module.loaded needed
+/******/ 			exports: {}
+/******/ 		};
+/******/ 	
+/******/ 		// Execute the module function
+/******/ 		__webpack_modules__[moduleId](module, module.exports, __webpack_require__);
+/******/ 	
+/******/ 		// Return the exports of the module
+/******/ 		return module.exports;
+/******/ 	}
+/******/ 	
+/************************************************************************/
+/******/ 	/* webpack/runtime/define property getters */
+/******/ 	(() => {
+/******/ 		// define getter functions for harmony exports
+/******/ 		__webpack_require__.d = (exports, definition) => {
+/******/ 			for(var key in definition) {
+/******/ 				if(__webpack_require__.o(definition, key) && !__webpack_require__.o(exports, key)) {
+/******/ 					Object.defineProperty(exports, key, { enumerable: true, get: definition[key] });
+/******/ 				}
+/******/ 			}
+/******/ 		};
+/******/ 	})();
+/******/ 	
+/******/ 	/* webpack/runtime/hasOwnProperty shorthand */
+/******/ 	(() => {
+/******/ 		__webpack_require__.o = (obj, prop) => (Object.prototype.hasOwnProperty.call(obj, prop));
+/******/ 	})();
+/******/ 	
+/******/ 	/* webpack/runtime/make namespace object */
+/******/ 	(() => {
+/******/ 		// define __esModule on exports
+/******/ 		__webpack_require__.r = (exports) => {
+/******/ 			if(typeof Symbol !== 'undefined' && Symbol.toStringTag) {
+/******/ 				Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
+/******/ 			}
+/******/ 			Object.defineProperty(exports, '__esModule', { value: true });
+/******/ 		};
+/******/ 	})();
+/******/ 	
+/************************************************************************/
+var __webpack_exports__ = {};
+// This entry need to be wrapped in an IIFE because it need to be isolated against other modules in the chunk.
+(() => {
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   "XzReadableStream": () => (/* binding */ XzReadableStream)
+/* harmony export */ });
+/* harmony import */ var _dist_native_xzwasm_wasm__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(1);
+
+
+const XZ_OK = 0;
+const XZ_STREAM_END = 1;
+
+class XzContext {
+    constructor(moduleInstance) {
+        this.exports = moduleInstance.exports;
+        this.memory = this.exports.memory;
+        this.ptr = this.exports.create_context();
+        this._refresh();
+        this.bufSize = this.mem32[0];
+        this.inStart = this.mem32[1] - this.ptr;
+        this.inEnd = this.inStart + this.bufSize;
+        this.outStart = this.mem32[4] - this.ptr;
+    }
+
+    supplyInput(sourceDataUint8Array) {
+        const inBuffer = this.mem8.subarray(this.inStart, this.inEnd);
+        inBuffer.set(sourceDataUint8Array, 0);
+        this.exports.supply_input(this.ptr, sourceDataUint8Array.byteLength);
+        this._refresh();
+    }
+
+    getNextOutput() {
+        const result = this.exports.get_next_output(this.ptr);
+        this._refresh();
+        if (result !== XZ_OK && result !== XZ_STREAM_END) {
+            throw new Error(`get_next_output failed with error code ${result}`);
+        }
+        const outChunk = this.mem8.subarray(this.outStart, this.outStart + /* outPos */ this.mem32[5]);
+        return { outChunk, finished: result === XZ_STREAM_END };
+    }
+
+    needsMoreInput() {
+        return /* inPos */ this.mem32[2] === /* inSize */ this.mem32[3];
+    }
+
+    outputBufferIsFull() {
+        return /* outPos */ this.mem32[5] === this.bufSize;
+    }
+
+    resetOutputBuffer() {
+        this.outPos = this.mem32[5] = 0;
+    }
+
+    dispose() {
+        this.exports.destroy_context(this.ptr);
+        this.exports = null;
+    }
+
+    _refresh() {
+        if (this.memory.buffer !== this.mem8?.buffer) {
+            this.mem8 = new Uint8Array(this.memory.buffer, this.ptr);
+            this.mem32 = new Uint32Array(this.memory.buffer, this.ptr);
+        }
+    }
+}
+
+class XzReadableStream extends ReadableStream {
+    static _moduleInstancePromise;
+    static _moduleInstance;
+    static async _getModuleInstance() {
+        const wasmBytes = await (await fetch(_dist_native_xzwasm_wasm__WEBPACK_IMPORTED_MODULE_0__)).arrayBuffer();
+        const wasmResponse = new Response(wasmBytes, { headers: { 'Content-Type': 'application/wasm' } });
+        const wasmOptions = {};
+        const module = typeof WebAssembly.instantiateStreaming === 'function'
+            ? await WebAssembly.instantiateStreaming(wasmResponse, wasmOptions)
+            : await WebAssembly.instantiate(await wasmResponse.arrayBuffer(), wasmOptions);
+        XzReadableStream._moduleInstance = module.instance;
+    }
+
+    constructor(compressedStream) {
+        let xzContext;
+        let unconsumedInput = null;
+        const compressedReader = compressedStream.getReader();
+
+        super({
+            async start(controller) {
+                if (!XzReadableStream._moduleInstance) {
+                    await (XzReadableStream._moduleInstancePromise || (XzReadableStream._moduleInstancePromise = XzReadableStream._getModuleInstance()));
+                }
+                xzContext = new XzContext(XzReadableStream._moduleInstance);
+            },
+
+            async pull(controller) {
+                if (xzContext.needsMoreInput()) {
+                    if (unconsumedInput === null || unconsumedInput.byteLength === 0) {
+                        const { done, value } = await compressedReader.read();
+                        if (!done) {
+                            unconsumedInput = value;
+                        }
+                    }
+                    const nextInputLength = Math.min(xzContext.bufSize, unconsumedInput.byteLength);
+                    xzContext.supplyInput(unconsumedInput.subarray(0, nextInputLength));
+                    unconsumedInput = unconsumedInput.subarray(nextInputLength);
+                }
+
+                const nextOutputResult = xzContext.getNextOutput();
+                controller.enqueue(nextOutputResult.outChunk);
+                xzContext.resetOutputBuffer();
+
+                if (nextOutputResult.finished) {
+                    xzContext.dispose(); // Not sure if this always happens
+                    controller.close();
+                }
+            },
+            cancel() {
+                xzContext.dispose(); // Not sure if this always happens
+                return compressedReader.cancel();
+            }
+        });
+    }
+}
+
+})();
+
+/******/ 	return __webpack_exports__;
+/******/ })()
+;
+});
+
 const FASTBOOT_USB_CLASS = 0xff;
 const FASTBOOT_USB_SUBCLASS = 0x42;
 const FASTBOOT_USB_PROTOCOL = 0x03;
@@ -3050,9 +3215,6 @@ const FASTBOOT_USB_PROTOCOL = 0x03;
 const BULK_TRANSFER_SIZE = 16384;
 
 const DEFAULT_DOWNLOAD_SIZE = 512 * 1024 * 1024; // 512 MiB
-// To conserve RAM and work around Chromium's ~2 GiB size limit, we limit the
-// max download size even if the bootloader can accept more data.
-const MAX_DOWNLOAD_SIZE = 1024 * 1024 * 1024; // 1 GiB
 
 const GETVAR_TIMEOUT = 10000; // ms
 
@@ -3090,6 +3252,8 @@ class FastbootDevice {
      */
     constructor() {
         this.device = null;
+        this.epIn = null;
+        this.epOut = null;
         this._registeredUsbListeners = false;
         this._connectResolve = null;
         this._connectReject = null;
@@ -3112,15 +3276,15 @@ class FastbootDevice {
      *
      * @private
      */
-    async _validateAndConnectDevice(rethrowErrors) {
+    async _validateAndConnectDevice() {
         // Validate device
         let ife = this.device.configurations[0].interfaces[0].alternates[0];
         if (ife.endpoints.length !== 2) {
             throw new UsbError("Interface has wrong number of endpoints");
         }
 
-        let epIn = null;
-        let epOut = null;
+        this.epIn = null;
+        this.epOut = null;
         for (let endpoint of ife.endpoints) {
             logVerbose("Checking endpoint:", endpoint);
             if (endpoint.type !== "bulk") {
@@ -3128,20 +3292,20 @@ class FastbootDevice {
             }
 
             if (endpoint.direction === "in") {
-                if (epIn === null) {
-                    epIn = endpoint.endpointNumber;
+                if (this.epIn === null) {
+                    this.epIn = endpoint.endpointNumber;
                 } else {
                     throw new UsbError("Interface has multiple IN endpoints");
                 }
             } else if (endpoint.direction === "out") {
-                if (epOut === null) {
-                    epOut = endpoint.endpointNumber;
+                if (this.epOut === null) {
+                    this.epOut = endpoint.endpointNumber;
                 } else {
                     throw new UsbError("Interface has multiple OUT endpoints");
                 }
             }
         }
-        logVerbose("Endpoints: in =", epIn, ", out =", epOut);
+        logVerbose("Endpoints: in =", this.epIn, ", out =", this.epOut);
 
         try {
             await this.device.open();
@@ -3162,9 +3326,7 @@ class FastbootDevice {
                 this._connectReject = null;
             }
 
-            if (rethrowErrors) {
-                throw error;
-            }
+            throw error;
         }
 
         // Return from waitForConnect()
@@ -3266,7 +3428,7 @@ class FastbootDevice {
                 // Check whether waitForConnect() is pending and save it for later
                 let hasPromiseReject = this._connectReject !== null;
                 try {
-                    await this._validateAndConnectDevice(false);
+                    await this._validateAndConnectDevice();
                 } catch (error) {
                     // Only rethrow errors from the event handler if waitForConnect()
                     // didn't already handle them
@@ -3279,7 +3441,7 @@ class FastbootDevice {
             this._registeredUsbListeners = true;
         }
 
-        await this._validateAndConnectDevice(true);
+        await this._validateAndConnectDevice();
     }
 
     /**
@@ -3296,7 +3458,7 @@ class FastbootDevice {
         };
         let respStatus;
         do {
-            let respPacket = await this.device.transferIn(0x01, 64);
+            let respPacket = await this.device.transferIn(this.epIn, 64);
             let response = new TextDecoder().decode(respPacket.data);
 
             respStatus = response.substring(0, 4);
@@ -3338,7 +3500,7 @@ class FastbootDevice {
 
         // Send raw UTF-8 command
         let cmdPacket = new TextEncoder("utf-8").encode(command);
-        await this.device.transferOut(0x01, cmdPacket);
+        await this.device.transferOut(this.epOut, cmdPacket);
         logDebug("Command:", command);
 
         return this._readResponse();
@@ -3386,12 +3548,19 @@ class FastbootDevice {
      */
     async _getDownloadSize() {
         try {
-            let resp = (
-                await this.getVariable("max-download-size")
-            ).toLowerCase();
-            if (resp) {
-                // AOSP fastboot requires hex
-                return Math.min(parseInt(resp, 16), MAX_DOWNLOAD_SIZE);
+            let resp = await this.getVariable("max-download-size");
+
+            if (resp !== undefined) {
+                if (!isNaN(resp) && !isNaN(parseFloat(resp))) {
+                    resp = parseInt(resp, 10);
+                    return resp;
+                } else {
+                    resp = parseInt(resp, 16);
+                    return resp;
+                }
+            } else {
+                resp = 512 * MB;
+                return resp;
             }
         } catch (error) {
             /* Failed = no value, fallthrough */
@@ -3432,7 +3601,7 @@ class FastbootDevice {
                 );
             }
 
-            await this.device.transferOut(0x01, chunk);
+            await this.device.transferOut(this.epOut, chunk);
 
             remainingBytes -= chunk.byteLength;
             i += 1;
@@ -3515,27 +3684,24 @@ class FastbootDevice {
      * depending on the bootloader's payload size limit.
      *
      * @param {string} partition - The name of the partition to flash.
-     * @param {Blob} blob - The Blob to retrieve data from.
+     * @param {Reader} reader - The actual image data to flash.
      * @param {ProgressCallback} onProgress - Callback for flashing progress updates.
+     * @param {number} rawsize - The size of the raw image in bytes.
      * @throws {FastbootError}
      */
-    async flashBlob(partition, blob, onProgress = () => {}) {
+    async flash(partition, reader, rawsize, onProgress = () => {}) {
+        const MB = 1024 * 1024;
+        let size = rawsize;
+        const response = new Response(reader);
+
         // Use current slot if partition is A/B
         if ((await this.getVariable(`has-slot:${partition}`)) === "yes") {
             partition += "_" + (await this.getVariable("current-slot"));
         }
 
         let maxDlSize = await this._getDownloadSize();
-        let fileHeader = await readBlobAsBuffer(
-            blob.slice(0, FILE_HEADER_SIZE)
-        );
-        let totalBytes = 0;
-        if (isSparse(fileHeader)) {
-            let sparseHeader = parseFileHeader(fileHeader);
-            totalBytes = sparseHeader.blocks * sparseHeader.blockSize;
-        } else {
-            totalBytes = blob.size;
-        }
+        
+        const blob = await response.blob();
 
         // Logical partitions need to be resized before flashing because they're
         // sized perfectly to the payload.
@@ -3545,34 +3711,22 @@ class FastbootDevice {
             await this.runCommand(`resize-logical-partition:${partition}:0`);
             // Set the actual size
             await this.runCommand(
-                `resize-logical-partition:${partition}:${totalBytes}`
+                `resize-logical-partition:${partition}:${size}`
             );
-        }
-
-        // Convert image to sparse (for splitting) if it exceeds the size limit
-        if (blob.size > maxDlSize && !isSparse(fileHeader)) {
-            logDebug(`${partition} image is raw, converting to sparse`);
-
-            // Assume that non-sparse images will always be small enough to convert in RAM.
-            // The buffer is converted to a Blob for compatibility with the existing flashing code.
-            let rawData = await readBlobAsBuffer(blob);
-            let sparse = fromRaw(rawData);
-            blob = new Blob([sparse]);
         }
 
         logDebug(
             `Flashing ${blob.size} bytes to ${partition}, ${maxDlSize} bytes per split`
         );
+
         let splits = 0;
         let sentBytes = 0;
-        for await (let split of splitBlob(blob, maxDlSize)) {
-            await this.upload(partition, split.data, (progress) => {
-                onProgress((sentBytes + progress * split.bytes) / totalBytes);
+        for await (let split of splitBlob(blob, Math.max(300 * MB, maxDlSize * 0.8))) {
+            await this.upload(partition, split, (progress) =>{
+                // Convert chunk progress to overall progress
+                onProgress((sentBytes + progress * split.bytes) / size);
             });
-
-            logDebug("Flashing payload...");
             await this.runCommand(`flash:${partition}`);
-
             splits += 1;
             sentBytes += split.bytes;
         }
