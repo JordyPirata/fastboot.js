@@ -1,3 +1,6 @@
+> [!NOTE]  
+> This package was modified to run Nix-Bitcoin on a OnePlus 6.
+
 # fastboot.js
 
 fastboot.js is an implementation of the Android [fastboot](https://android.googlesource.com/platform/system/core/+/master/fastboot/README.md) protocol in JavaScript. It runs in web browsers by using the [WebUSB](https://wicg.github.io/webusb/) API, which is currently supported by Chrome.
@@ -24,7 +27,7 @@ The following fastboot features are supported:
 
 Detailed progress callbacks are also provided for many flashing steps.
 
-## Installation
+## Installation (This is for Kdrag0n version)
 
 This library is available as a [package](https://www.npmjs.com/package/android-fastboot) on npm, so you can easily add it to your project:
 
@@ -35,12 +38,41 @@ npm install --save android-fastboot
 # Using yarn
 yarn add android-fastboot
 ```
+## Installation (This version)
+
+To link this project to another local instance, you can use the following steps:
+
+1. Insatall the dist files to the target project:
+    ```sh
+    cd /path/to/target/project
+    npm install --save /path/to/this/fork/fastboot.js 
+    ```
+
+## Development
+
+To install Yarn, you can use the following command:
+
+```sh
+npm install -g yarn
+```
+
+To install project dependencies using Yarn, navigate to your project directory and run:
+
+```sh
+yarn install
+```
+
+Build the project to generate the dist files:
+
+```sh
+yarn run build
+```
 
 ## Examples
 
 A basic demo of fastboot.js can be found [here](https://kdrag0n.github.io/fastboot.js/demo/). The source code is included [in this repository](https://github.com/kdrag0n/fastboot.js/tree/master/demo).
 
-There is also a [user-friendly ROM installer](https://github.com/kdrag0n/android-webinstall) available, with a [live ProtonAOSP instance](https://protonaosp.kdrag0n.dev/install/web/?utm_source=github-fastbootjs) that can be used to flash devices officially supported by ProtonAOSP.
+There is also a [user-friendly ROM installer](https://github.com/kdrag0n/android-webinstall) available, with a [live ProtonAOSP instance](https://protonaosp.kdrag0n.dev/install/web/?utm_source=github&utm_campaign=fastboot.js) that can be used to flash devices officially supported by ProtonAOSP.
 
 ## Documentation
 
