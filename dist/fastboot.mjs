@@ -270,6 +270,9 @@ async function fromRaw(blob) {
  */
 async function* splitBlob(blob, splitSize) {
     logDebug(`Splitting ${blob.size}-byte sparse image into ${splitSize}-byte chunks`);
+    // 7/8 is a safe value for the split size, to account for extra overhead
+    // AOSP source code does the same
+    const safeSendValue = Math.floor(splitSize * (7 / 8));
     // Short-circuit if splitting isn't required
     if (blob.size <= splitSize) {
         logDebug("Blob fits in 1 payload, not splitting");
@@ -291,49 +294,74 @@ async function* splitBlob(blob, splitSize) {
     let splitDataBytes = 0;
     for (let i = 0; i < header.chunks; i++) {
         let chunkHeaderData = await readBlobAsBuffer(blob.slice(0, CHUNK_HEADER_SIZE));
-        let chunk = parseChunkHeader(chunkHeaderData);
-        chunk.data = blob.slice(CHUNK_HEADER_SIZE, CHUNK_HEADER_SIZE + chunk.dataBytes);
-        blob = blob.slice(CHUNK_HEADER_SIZE + chunk.dataBytes);
-        let bytesRemaining = splitSize - calcChunksSize(splitChunks);
-        logVerbose(`  Chunk ${i}: type ${chunk.type}, ${chunk.dataBytes} bytes / ${chunk.blocks} blocks, ${bytesRemaining} bytes remaining`);
-        if (bytesRemaining >= chunk.dataBytes) {
-            // Read the chunk and add it
-            logVerbose("    Space is available, adding chunk");
-            splitChunks.push(chunk);
-            // Track amount of data written on the output device, in bytes
-            splitDataBytes += chunk.blocks * header.blockSize;
+        let originalChunk = parseChunkHeader(chunkHeaderData);
+        originalChunk.data = blob.slice(CHUNK_HEADER_SIZE, CHUNK_HEADER_SIZE + originalChunk.dataBytes);
+        blob = blob.slice(CHUNK_HEADER_SIZE + originalChunk.dataBytes);
+        let chunksToProcess = [];
+        // take into account cases where the chunk data is bigger than the maximum allowed download size
+        if (originalChunk.dataBytes > safeSendValue) {
+            logDebug(`Data of chunk ${i} is bigger than the maximum allowed download size: ${originalChunk.dataBytes} > ${safeSendValue}`);
+            // we should now split this chunk into multiple chunks that fit
+            let originalDataBytes = originalChunk.dataBytes;
+            let originalData = originalChunk.data;
+            while (originalDataBytes > 0) {
+                const toSend = Math.min(safeSendValue, originalDataBytes);
+                chunksToProcess.push({
+                    type: originalChunk.type,
+                    dataBytes: toSend,
+                    data: originalData.slice(0, toSend),
+                    blocks: toSend / header?.blockSize
+                });
+                originalData = originalData.slice(toSend);
+                originalDataBytes -= toSend;
+            }
+            logDebug("chunksToProcess", chunksToProcess);
         }
         else {
-            // Out of space, finish this split
-            // Blocks need to be calculated from chunk headers instead of going by size
-            // because FILL and SKIP chunks cover more blocks than the data they contain.
-            let splitBlocks = calcChunksBlockSize(splitChunks);
-            splitChunks.push({
-                type: ChunkType.Skip,
-                blocks: header.blocks - splitBlocks,
-                data: new Blob([]),
-                dataBytes: 0,
-            });
-            logVerbose(`Partition is ${header.blocks} blocks, used ${splitBlocks}, padded with ${header.blocks - splitBlocks}, finishing split with ${calcChunksBlockSize(splitChunks)} blocks`);
-            let splitImage = await createImage(header, splitChunks);
-            logDebug(`Finished ${splitImage.size}-byte split with ${splitChunks.length} chunks`);
-            yield {
-                data: await readBlobAsBuffer(splitImage),
-                bytes: splitDataBytes,
-            };
-            // Start a new split. Every split is considered a full image by the
-            // bootloader, so we need to skip the *total* written blocks.
-            logVerbose(`Starting new split: skipping first ${splitBlocks} blocks and adding chunk`);
-            splitChunks = [
-                {
+            chunksToProcess.push(originalChunk);
+        }
+        for (const chunk of chunksToProcess) {
+            let bytesRemaining = splitSize - calcChunksSize(splitChunks);
+            logVerbose(`  Chunk ${i}: type ${chunk.type}, ${chunk.dataBytes} bytes / ${chunk.blocks} blocks, ${bytesRemaining} bytes remaining`);
+            if (bytesRemaining >= chunk.dataBytes) {
+                // Read the chunk and add it
+                logVerbose("    Space is available, adding chunk");
+                splitChunks.push(chunk);
+                // Track amount of data written on the output device, in bytes
+                splitDataBytes += chunk.blocks * header.blockSize;
+            }
+            else {
+                // Out of space, finish this split
+                // Blocks need to be calculated from chunk headers instead of going by size
+                // because FILL and SKIP chunks cover more blocks than the data they contain.
+                let splitBlocks = calcChunksBlockSize(splitChunks);
+                splitChunks.push({
                     type: ChunkType.Skip,
-                    blocks: splitBlocks,
+                    blocks: header.blocks - splitBlocks,
                     data: new Blob([]),
                     dataBytes: 0,
-                },
-                chunk,
-            ];
-            splitDataBytes = 0;
+                });
+                logVerbose(`Partition is ${header.blocks} blocks, used ${splitBlocks}, padded with ${header.blocks - splitBlocks}, finishing split with ${calcChunksBlockSize(splitChunks)} blocks`);
+                let splitImage = await createImage(header, splitChunks);
+                logDebug(`Finished ${splitImage.size}-byte split with ${splitChunks.length} chunks`);
+                yield {
+                    data: await readBlobAsBuffer(splitImage),
+                    bytes: splitDataBytes,
+                };
+                // Start a new split. Every split is considered a full image by the
+                // bootloader, so we need to skip the *total* written blocks.
+                logVerbose(`Starting new split: skipping first ${splitBlocks} blocks and adding chunk`);
+                splitChunks = [
+                    {
+                        type: ChunkType.Skip,
+                        blocks: splitBlocks,
+                        data: new Blob([]),
+                        dataBytes: 0,
+                    },
+                    chunk,
+                ];
+                splitDataBytes = chunk.dataBytes;
+            }
         }
     }
     // Finish the final split if necessary
@@ -378,7 +406,7 @@ async function* splitBlob(blob, splitSize) {
 
 // Global
 
-const MAX_BITS$1 = 15;
+const MAX_BITS = 15;
 const D_CODES = 30;
 const BL_CODES = 19;
 
@@ -415,17 +443,17 @@ const Z_FILTERED = 1;
 const Z_HUFFMAN_ONLY = 2;
 const Z_DEFAULT_STRATEGY = 0;
 
-const Z_NO_FLUSH$1 = 0;
+const Z_NO_FLUSH = 0;
 const Z_PARTIAL_FLUSH = 1;
 const Z_FULL_FLUSH = 3;
-const Z_FINISH$1 = 4;
+const Z_FINISH = 4;
 
-const Z_OK$1 = 0;
-const Z_STREAM_END$1 = 1;
-const Z_NEED_DICT$1 = 2;
-const Z_STREAM_ERROR$1 = -2;
-const Z_DATA_ERROR$1 = -3;
-const Z_BUF_ERROR$1 = -5;
+const Z_OK = 0;
+const Z_STREAM_END = 1;
+const Z_NEED_DICT = 2;
+const Z_STREAM_ERROR = -2;
+const Z_DATA_ERROR = -3;
+const Z_BUF_ERROR = -5;
 
 // Tree
 
@@ -468,7 +496,7 @@ function Tree() {
 		let f; // frequency
 		let overflow = 0; // number of elements with bit length too large
 
-		for (bits = 0; bits <= MAX_BITS$1; bits++)
+		for (bits = 0; bits <= MAX_BITS; bits++)
 			s.bl_count[bits] = 0;
 
 		// In a first pass, compute the optimal bit lengths (which may
@@ -564,7 +592,7 @@ function Tree() {
 
 		// The distribution counts are first used to generate the code values
 		// without bit reversal.
-		for (bits = 1; bits <= MAX_BITS$1; bits++) {
+		for (bits = 1; bits <= MAX_BITS; bits++) {
 			next_code[bits] = code = ((code + bl_count[bits - 1]) << 1);
 		}
 
@@ -728,9 +756,9 @@ StaticTree.static_ltree = [12, 8, 140, 8, 76, 8, 204, 8, 44, 8, 172, 8, 108, 8, 
 StaticTree.static_dtree = [0, 5, 16, 5, 8, 5, 24, 5, 4, 5, 20, 5, 12, 5, 28, 5, 2, 5, 18, 5, 10, 5, 26, 5, 6, 5, 22, 5, 14, 5, 30, 5, 1, 5, 17, 5, 9, 5,
 	25, 5, 5, 5, 21, 5, 13, 5, 29, 5, 3, 5, 19, 5, 11, 5, 27, 5, 7, 5, 23, 5];
 
-StaticTree.static_l_desc = new StaticTree(StaticTree.static_ltree, Tree.extra_lbits, LITERALS + 1, L_CODES, MAX_BITS$1);
+StaticTree.static_l_desc = new StaticTree(StaticTree.static_ltree, Tree.extra_lbits, LITERALS + 1, L_CODES, MAX_BITS);
 
-StaticTree.static_d_desc = new StaticTree(StaticTree.static_dtree, Tree.extra_dbits, 0, D_CODES, MAX_BITS$1);
+StaticTree.static_d_desc = new StaticTree(StaticTree.static_dtree, Tree.extra_dbits, 0, D_CODES, MAX_BITS);
 
 StaticTree.static_bl_desc = new StaticTree(null, Tree.extra_blbits, 0, BL_CODES, MAX_BL_BITS);
 
@@ -748,11 +776,11 @@ function Config(good_length, max_lazy, nice_length, max_chain, func) {
 	that.func = func;
 }
 
-const STORED$1 = 0;
+const STORED = 0;
 const FAST = 1;
 const SLOW = 2;
 const config_table = [
-	new Config(0, 0, 0, 0, STORED$1),
+	new Config(0, 0, 0, 0, STORED),
 	new Config(4, 4, 8, 4, FAST),
 	new Config(4, 5, 16, 8, FAST),
 	new Config(4, 6, 32, 32, FAST),
@@ -789,14 +817,14 @@ const FinishStarted = 2;
 const FinishDone = 3;
 
 // preset dictionary flag in zlib header
-const PRESET_DICT$1 = 0x20;
+const PRESET_DICT = 0x20;
 
 const INIT_STATE = 42;
 const BUSY_STATE = 113;
 const FINISH_STATE = 666;
 
 // The deflate compression method
-const Z_DEFLATED$1 = 8;
+const Z_DEFLATED = 8;
 
 const STORED_BLOCK = 0;
 const STATIC_TREES = 1;
@@ -812,7 +840,7 @@ function smaller(tree, n, m, depth) {
 	return (tn2 < tm2 || (tn2 == tm2 && depth[n] <= depth[m]));
 }
 
-function Deflate$1() {
+function Deflate() {
 
 	const that = this;
 	let strm; // pointer back to this zlib stream
@@ -1589,7 +1617,7 @@ function Deflate$1() {
 			// Fill the window as much as possible:
 			if (lookahead <= 1) {
 				fill_window();
-				if (lookahead === 0 && flush == Z_NO_FLUSH$1)
+				if (lookahead === 0 && flush == Z_NO_FLUSH)
 					return NeedMore;
 				if (lookahead === 0)
 					break; // flush the current block
@@ -1620,11 +1648,11 @@ function Deflate$1() {
 			}
 		}
 
-		flush_block_only(flush == Z_FINISH$1);
+		flush_block_only(flush == Z_FINISH);
 		if (strm.avail_out === 0)
-			return (flush == Z_FINISH$1) ? FinishStarted : NeedMore;
+			return (flush == Z_FINISH) ? FinishStarted : NeedMore;
 
-		return flush == Z_FINISH$1 ? FinishDone : BlockDone;
+		return flush == Z_FINISH ? FinishDone : BlockDone;
 	}
 
 	function longest_match(cur_match) {
@@ -1722,7 +1750,7 @@ function Deflate$1() {
 			// string following the next match.
 			if (lookahead < MIN_LOOKAHEAD) {
 				fill_window();
-				if (lookahead < MIN_LOOKAHEAD && flush == Z_NO_FLUSH$1) {
+				if (lookahead < MIN_LOOKAHEAD && flush == Z_NO_FLUSH) {
 					return NeedMore;
 				}
 				if (lookahead === 0)
@@ -1801,14 +1829,14 @@ function Deflate$1() {
 			}
 		}
 
-		flush_block_only(flush == Z_FINISH$1);
+		flush_block_only(flush == Z_FINISH);
 		if (strm.avail_out === 0) {
-			if (flush == Z_FINISH$1)
+			if (flush == Z_FINISH)
 				return FinishStarted;
 			else
 				return NeedMore;
 		}
-		return flush == Z_FINISH$1 ? FinishDone : BlockDone;
+		return flush == Z_FINISH ? FinishDone : BlockDone;
 	}
 
 	// Same as above, but achieves better compression. We use a lazy
@@ -1830,7 +1858,7 @@ function Deflate$1() {
 
 			if (lookahead < MIN_LOOKAHEAD) {
 				fill_window();
-				if (lookahead < MIN_LOOKAHEAD && flush == Z_NO_FLUSH$1) {
+				if (lookahead < MIN_LOOKAHEAD && flush == Z_NO_FLUSH) {
 					return NeedMore;
 				}
 				if (lookahead === 0)
@@ -1934,16 +1962,16 @@ function Deflate$1() {
 			bflush = _tr_tally(0, window[strstart - 1] & 0xff);
 			match_available = 0;
 		}
-		flush_block_only(flush == Z_FINISH$1);
+		flush_block_only(flush == Z_FINISH);
 
 		if (strm.avail_out === 0) {
-			if (flush == Z_FINISH$1)
+			if (flush == Z_FINISH)
 				return FinishStarted;
 			else
 				return NeedMore;
 		}
 
-		return flush == Z_FINISH$1 ? FinishDone : BlockDone;
+		return flush == Z_FINISH ? FinishDone : BlockDone;
 	}
 
 	function deflateReset(strm) {
@@ -1955,16 +1983,16 @@ function Deflate$1() {
 
 		status = BUSY_STATE;
 
-		last_flush = Z_NO_FLUSH$1;
+		last_flush = Z_NO_FLUSH;
 
 		tr_init();
 		lm_init();
-		return Z_OK$1;
+		return Z_OK;
 	}
 
 	that.deflateInit = function (strm, _level, bits, _method, memLevel, _strategy) {
 		if (!_method)
-			_method = Z_DEFLATED$1;
+			_method = Z_DEFLATED;
 		if (!memLevel)
 			memLevel = DEF_MEM_LEVEL;
 		if (!_strategy)
@@ -1983,9 +2011,9 @@ function Deflate$1() {
 		if (_level == Z_DEFAULT_COMPRESSION)
 			_level = 6;
 
-		if (memLevel < 1 || memLevel > MAX_MEM_LEVEL || _method != Z_DEFLATED$1 || bits < 9 || bits > 15 || _level < 0 || _level > 9 || _strategy < 0
+		if (memLevel < 1 || memLevel > MAX_MEM_LEVEL || _method != Z_DEFLATED || bits < 9 || bits > 15 || _level < 0 || _level > 9 || _strategy < 0
 			|| _strategy > Z_HUFFMAN_ONLY) {
-			return Z_STREAM_ERROR$1;
+			return Z_STREAM_ERROR;
 		}
 
 		strm.dstate = that;
@@ -2022,7 +2050,7 @@ function Deflate$1() {
 
 	that.deflateEnd = function () {
 		if (status != INIT_STATE && status != BUSY_STATE && status != FINISH_STATE) {
-			return Z_STREAM_ERROR$1;
+			return Z_STREAM_ERROR;
 		}
 		// Deallocate in reverse order of allocations:
 		that.pending_buf = null;
@@ -2031,17 +2059,17 @@ function Deflate$1() {
 		window = null;
 		// free
 		that.dstate = null;
-		return status == BUSY_STATE ? Z_DATA_ERROR$1 : Z_OK$1;
+		return status == BUSY_STATE ? Z_DATA_ERROR : Z_OK;
 	};
 
 	that.deflateParams = function (strm, _level, _strategy) {
-		let err = Z_OK$1;
+		let err = Z_OK;
 
 		if (_level == Z_DEFAULT_COMPRESSION) {
 			_level = 6;
 		}
 		if (_level < 0 || _level > 9 || _strategy < 0 || _strategy > Z_HUFFMAN_ONLY) {
-			return Z_STREAM_ERROR$1;
+			return Z_STREAM_ERROR;
 		}
 
 		if (config_table[level].func != config_table[_level].func && strm.total_in !== 0) {
@@ -2065,10 +2093,10 @@ function Deflate$1() {
 		let n, index = 0;
 
 		if (!dictionary || status != INIT_STATE)
-			return Z_STREAM_ERROR$1;
+			return Z_STREAM_ERROR;
 
 		if (length < MIN_MATCH)
-			return Z_OK$1;
+			return Z_OK;
 		if (length > w_size - MIN_LOOKAHEAD) {
 			length = w_size - MIN_LOOKAHEAD;
 			index = dictLength - length; // use the tail of the dictionary
@@ -2090,23 +2118,23 @@ function Deflate$1() {
 			prev[n & w_mask] = head[ins_h];
 			head[ins_h] = n;
 		}
-		return Z_OK$1;
+		return Z_OK;
 	};
 
 	that.deflate = function (_strm, flush) {
 		let i, header, level_flags, old_flush, bstate;
 
-		if (flush > Z_FINISH$1 || flush < 0) {
-			return Z_STREAM_ERROR$1;
+		if (flush > Z_FINISH || flush < 0) {
+			return Z_STREAM_ERROR;
 		}
 
-		if (!_strm.next_out || (!_strm.next_in && _strm.avail_in !== 0) || (status == FINISH_STATE && flush != Z_FINISH$1)) {
-			_strm.msg = z_errmsg[Z_NEED_DICT$1 - (Z_STREAM_ERROR$1)];
-			return Z_STREAM_ERROR$1;
+		if (!_strm.next_out || (!_strm.next_in && _strm.avail_in !== 0) || (status == FINISH_STATE && flush != Z_FINISH)) {
+			_strm.msg = z_errmsg[Z_NEED_DICT - (Z_STREAM_ERROR)];
+			return Z_STREAM_ERROR;
 		}
 		if (_strm.avail_out === 0) {
-			_strm.msg = z_errmsg[Z_NEED_DICT$1 - (Z_BUF_ERROR$1)];
-			return Z_BUF_ERROR$1;
+			_strm.msg = z_errmsg[Z_NEED_DICT - (Z_BUF_ERROR)];
+			return Z_BUF_ERROR;
 		}
 
 		strm = _strm; // just in case
@@ -2115,14 +2143,14 @@ function Deflate$1() {
 
 		// Write the zlib header
 		if (status == INIT_STATE) {
-			header = (Z_DEFLATED$1 + ((w_bits - 8) << 4)) << 8;
+			header = (Z_DEFLATED + ((w_bits - 8) << 4)) << 8;
 			level_flags = ((level - 1) & 0xff) >> 1;
 
 			if (level_flags > 3)
 				level_flags = 3;
 			header |= (level_flags << 6);
 			if (strstart !== 0)
-				header |= PRESET_DICT$1;
+				header |= PRESET_DICT;
 			header += 31 - (header % 31);
 
 			status = BUSY_STATE;
@@ -2140,29 +2168,29 @@ function Deflate$1() {
 				// but this is not an error situation so make sure we
 				// return OK instead of BUF_ERROR at next call of deflate:
 				last_flush = -1;
-				return Z_OK$1;
+				return Z_OK;
 			}
 
 			// Make sure there is something to do and avoid duplicate
 			// consecutive
 			// flushes. For repeated and useless calls with Z_FINISH, we keep
 			// returning Z_STREAM_END instead of Z_BUFF_ERROR.
-		} else if (strm.avail_in === 0 && flush <= old_flush && flush != Z_FINISH$1) {
-			strm.msg = z_errmsg[Z_NEED_DICT$1 - (Z_BUF_ERROR$1)];
-			return Z_BUF_ERROR$1;
+		} else if (strm.avail_in === 0 && flush <= old_flush && flush != Z_FINISH) {
+			strm.msg = z_errmsg[Z_NEED_DICT - (Z_BUF_ERROR)];
+			return Z_BUF_ERROR;
 		}
 
 		// User must not provide more input after the first FINISH:
 		if (status == FINISH_STATE && strm.avail_in !== 0) {
-			_strm.msg = z_errmsg[Z_NEED_DICT$1 - (Z_BUF_ERROR$1)];
-			return Z_BUF_ERROR$1;
+			_strm.msg = z_errmsg[Z_NEED_DICT - (Z_BUF_ERROR)];
+			return Z_BUF_ERROR;
 		}
 
 		// Start a new block or continue the current one.
-		if (strm.avail_in !== 0 || lookahead !== 0 || (flush != Z_NO_FLUSH$1 && status != FINISH_STATE)) {
+		if (strm.avail_in !== 0 || lookahead !== 0 || (flush != Z_NO_FLUSH && status != FINISH_STATE)) {
 			bstate = -1;
 			switch (config_table[level].func) {
-				case STORED$1:
+				case STORED:
 					bstate = deflate_stored(flush);
 					break;
 				case FAST:
@@ -2180,7 +2208,7 @@ function Deflate$1() {
 				if (strm.avail_out === 0) {
 					last_flush = -1; // avoid BUF_ERROR next call, see above
 				}
-				return Z_OK$1;
+				return Z_OK;
 				// If flush != Z_NO_FLUSH && avail_out === 0, the next call
 				// of deflate should use the same flush parameter to make sure
 				// that the flush is complete. So we don't have to output an
@@ -2206,20 +2234,20 @@ function Deflate$1() {
 				strm.flush_pending();
 				if (strm.avail_out === 0) {
 					last_flush = -1; // avoid BUF_ERROR at next call, see above
-					return Z_OK$1;
+					return Z_OK;
 				}
 			}
 		}
 
-		if (flush != Z_FINISH$1)
-			return Z_OK$1;
-		return Z_STREAM_END$1;
+		if (flush != Z_FINISH)
+			return Z_OK;
+		return Z_STREAM_END;
 	};
 }
 
 // ZStream
 
-function ZStream$1() {
+function ZStream() {
 	const that = this;
 	that.next_in_index = 0;
 	that.next_out_index = 0;
@@ -2233,19 +2261,19 @@ function ZStream$1() {
 	// that.dstate;
 }
 
-ZStream$1.prototype = {
+ZStream.prototype = {
 	deflateInit: function (level, bits) {
 		const that = this;
-		that.dstate = new Deflate$1();
+		that.dstate = new Deflate();
 		if (!bits)
-			bits = MAX_BITS$1;
+			bits = MAX_BITS;
 		return that.dstate.deflateInit(that, level, bits);
 	},
 
 	deflate: function (flush) {
 		const that = this;
 		if (!that.dstate) {
-			return Z_STREAM_ERROR$1;
+			return Z_STREAM_ERROR;
 		}
 		return that.dstate.deflate(that, flush);
 	},
@@ -2253,7 +2281,7 @@ ZStream$1.prototype = {
 	deflateEnd: function () {
 		const that = this;
 		if (!that.dstate)
-			return Z_STREAM_ERROR$1;
+			return Z_STREAM_ERROR;
 		const ret = that.dstate.deflateEnd();
 		that.dstate = null;
 		return ret;
@@ -2262,14 +2290,14 @@ ZStream$1.prototype = {
 	deflateParams: function (level, strategy) {
 		const that = this;
 		if (!that.dstate)
-			return Z_STREAM_ERROR$1;
+			return Z_STREAM_ERROR;
 		return that.dstate.deflateParams(that, level, strategy);
 	},
 
 	deflateSetDictionary: function (dictionary, dictLength) {
 		const that = this;
 		if (!that.dstate)
-			return Z_STREAM_ERROR$1;
+			return Z_STREAM_ERROR;
 		return that.dstate.deflateSetDictionary(that, dictionary, dictLength);
 	},
 
@@ -2330,9 +2358,9 @@ ZStream$1.prototype = {
 
 function ZipDeflate(options) {
 	const that = this;
-	const z = new ZStream$1();
+	const z = new ZStream();
 	const bufsize = options && options.chunkSize ? Math.floor(options.chunkSize * 1.05) : 64 * 1024;
-	const flush = Z_NO_FLUSH$1;
+	const flush = Z_NO_FLUSH;
 	const buf = new Uint8Array(bufsize);
 	let level = options ? options.level : Z_DEFAULT_COMPRESSION;
 	if (typeof level == "undefined")
@@ -2352,7 +2380,7 @@ function ZipDeflate(options) {
 			z.next_out_index = 0;
 			z.avail_out = bufsize;
 			err = z.deflate(flush);
-			if (err != Z_OK$1)
+			if (err != Z_OK)
 				throw new Error("deflating: " + z.msg);
 			if (z.next_out_index)
 				if (z.next_out_index == bufsize)
@@ -2382,8 +2410,8 @@ function ZipDeflate(options) {
 		do {
 			z.next_out_index = 0;
 			z.avail_out = bufsize;
-			err = z.deflate(Z_FINISH$1);
-			if (err != Z_STREAM_END$1 && err != Z_OK$1)
+			err = z.deflate(Z_FINISH);
+			if (err != Z_STREAM_END && err != Z_OK)
 				throw new Error("deflating: " + z.msg);
 			if (bufsize - z.avail_out > 0)
 				buffers.push(buf.slice(0, z.next_out_index));
@@ -2428,15 +2456,15 @@ function ZipDeflate(options) {
  */
 
 // Global
-const MAX_BITS = 15;
+const MAX_BITS$1 = 15;
 
-const Z_OK = 0;
-const Z_STREAM_END = 1;
-const Z_NEED_DICT = 2;
-const Z_STREAM_ERROR = -2;
-const Z_DATA_ERROR = -3;
+const Z_OK$1 = 0;
+const Z_STREAM_END$1 = 1;
+const Z_NEED_DICT$1 = 2;
+const Z_STREAM_ERROR$1 = -2;
+const Z_DATA_ERROR$1 = -3;
 const Z_MEM_ERROR = -4;
-const Z_BUF_ERROR = -5;
+const Z_BUF_ERROR$1 = -5;
 
 const inflate_mask = [0x00000000, 0x00000001, 0x00000003, 0x00000007, 0x0000000f, 0x0000001f, 0x0000003f, 0x0000007f, 0x000000ff, 0x000001ff, 0x000003ff,
 	0x000007ff, 0x00000fff, 0x00001fff, 0x00003fff, 0x00007fff, 0x0000ffff];
@@ -2444,8 +2472,8 @@ const inflate_mask = [0x00000000, 0x00000001, 0x00000003, 0x00000007, 0x0000000f
 const MANY = 1440;
 
 // JZlib version : "1.0.2"
-const Z_NO_FLUSH = 0;
-const Z_FINISH = 4;
+const Z_NO_FLUSH$1 = 0;
+const Z_FINISH$1 = 4;
 
 // InfTree
 const fixed_bl = 9;
@@ -2570,7 +2598,7 @@ function InfTree() {
 		if (c[0] == n) { // null input--all zero length codes
 			t[0] = -1;
 			m[0] = 0;
-			return Z_OK;
+			return Z_OK$1;
 		}
 
 		// Find minimum and maximum length, bound *m by those
@@ -2595,11 +2623,11 @@ function InfTree() {
 		// Adjust last length count to fill out codes, if needed
 		for (y = 1 << j; j < i; j++, y <<= 1) {
 			if ((y -= c[j]) < 0) {
-				return Z_DATA_ERROR;
+				return Z_DATA_ERROR$1;
 			}
 		}
 		if ((y -= c[i]) < 0) {
-			return Z_DATA_ERROR;
+			return Z_DATA_ERROR$1;
 		}
 		c[i] += y;
 
@@ -2662,7 +2690,7 @@ function InfTree() {
 
 					// allocate new table
 					if (hn[0] + z > MANY) { // (note: doesn't matter for fixed)
-						return Z_DATA_ERROR; // overflow of MANY
+						return Z_DATA_ERROR$1; // overflow of MANY
 					}
 					u[h] = q = /* hp+ */hn[0]; // DEBUG
 					hn[0] += z;
@@ -2719,7 +2747,7 @@ function InfTree() {
 			}
 		}
 		// Return Z_BUF_ERROR if we were given an incomplete table
-		return y !== 0 && g != 1 ? Z_BUF_ERROR : Z_OK;
+		return y !== 0 && g != 1 ? Z_BUF_ERROR$1 : Z_OK$1;
 	}
 
 	function initWorkArea(vsize) {
@@ -2761,11 +2789,11 @@ function InfTree() {
 		hn[0] = 0;
 		result = huft_build(c, 0, 19, 19, null, null, tb, bb, hp, hn, v);
 
-		if (result == Z_DATA_ERROR) {
+		if (result == Z_DATA_ERROR$1) {
 			z.msg = "oversubscribed dynamic bit lengths tree";
-		} else if (result == Z_BUF_ERROR || bb[0] === 0) {
+		} else if (result == Z_BUF_ERROR$1 || bb[0] === 0) {
 			z.msg = "incomplete dynamic bit lengths tree";
-			result = Z_DATA_ERROR;
+			result = Z_DATA_ERROR$1;
 		}
 		return result;
 	};
@@ -2786,12 +2814,12 @@ function InfTree() {
 		initWorkArea(288);
 		hn[0] = 0;
 		result = huft_build(c, 0, nl, 257, cplens, cplext, tl, bl, hp, hn, v);
-		if (result != Z_OK || bl[0] === 0) {
-			if (result == Z_DATA_ERROR) {
+		if (result != Z_OK$1 || bl[0] === 0) {
+			if (result == Z_DATA_ERROR$1) {
 				z.msg = "oversubscribed literal/length tree";
 			} else if (result != Z_MEM_ERROR) {
 				z.msg = "incomplete literal/length tree";
-				result = Z_DATA_ERROR;
+				result = Z_DATA_ERROR$1;
 			}
 			return result;
 		}
@@ -2800,20 +2828,20 @@ function InfTree() {
 		initWorkArea(288);
 		result = huft_build(c, nl, nd, 0, cpdist, cpdext, td, bd, hp, hn, v);
 
-		if (result != Z_OK || (bd[0] === 0 && nl > 257)) {
-			if (result == Z_DATA_ERROR) {
+		if (result != Z_OK$1 || (bd[0] === 0 && nl > 257)) {
+			if (result == Z_DATA_ERROR$1) {
 				z.msg = "oversubscribed distance tree";
-			} else if (result == Z_BUF_ERROR) {
+			} else if (result == Z_BUF_ERROR$1) {
 				z.msg = "incomplete distance tree";
-				result = Z_DATA_ERROR;
+				result = Z_DATA_ERROR$1;
 			} else if (result != Z_MEM_ERROR) {
 				z.msg = "empty distance tree with lengths";
-				result = Z_DATA_ERROR;
+				result = Z_DATA_ERROR$1;
 			}
 			return result;
 		}
 
-		return Z_OK;
+		return Z_OK$1;
 	};
 
 }
@@ -2827,7 +2855,7 @@ InfTree.inflate_trees_fixed = function (bl, // literal desired/actual bit depth
 	bd[0] = fixed_bd;
 	tl[0] = fixed_tl;
 	td[0] = fixed_td;
-	return Z_OK;
+	return Z_OK$1;
 };
 
 // InfCodes
@@ -3050,7 +3078,7 @@ function InfCodes() {
 							z.next_in_index = p;
 							s.write = q;
 
-							return Z_DATA_ERROR;
+							return Z_DATA_ERROR$1;
 						}
 						// eslint-disable-next-line no-constant-condition
 					} while (true);
@@ -3085,7 +3113,7 @@ function InfCodes() {
 					z.next_in_index = p;
 					s.write = q;
 
-					return Z_STREAM_END;
+					return Z_STREAM_END$1;
 				} else {
 					z.msg = "invalid literal/length code";
 
@@ -3102,7 +3130,7 @@ function InfCodes() {
 					z.next_in_index = p;
 					s.write = q;
 
-					return Z_DATA_ERROR;
+					return Z_DATA_ERROR$1;
 				}
 				// eslint-disable-next-line no-constant-condition
 			} while (true);
@@ -3122,7 +3150,7 @@ function InfCodes() {
 		z.next_in_index = p;
 		s.write = q;
 
-		return Z_OK;
+		return Z_OK$1;
 	}
 
 	that.init = function (bl, bd, tl, tl_index, td, td_index) {
@@ -3179,8 +3207,8 @@ function InfCodes() {
 						q = s.write;
 						m = q < s.read ? s.read - q - 1 : s.end - q;
 
-						if (r != Z_OK) {
-							mode = r == Z_STREAM_END ? WASH : BADCODE;
+						if (r != Z_OK$1) {
+							mode = r == Z_STREAM_END$1 ? WASH : BADCODE;
 							break;
 						}
 					}
@@ -3195,7 +3223,7 @@ function InfCodes() {
 
 					while (k < (j)) {
 						if (n !== 0)
-							r = Z_OK;
+							r = Z_OK$1;
 						else {
 
 							s.bitb = b;
@@ -3240,7 +3268,7 @@ function InfCodes() {
 					}
 					mode = BADCODE; // invalid code
 					z.msg = "invalid literal/length code";
-					r = Z_DATA_ERROR;
+					r = Z_DATA_ERROR$1;
 
 					s.bitb = b;
 					s.bitk = k;
@@ -3255,7 +3283,7 @@ function InfCodes() {
 
 					while (k < (j)) {
 						if (n !== 0)
-							r = Z_OK;
+							r = Z_OK$1;
 						else {
 
 							s.bitb = b;
@@ -3286,7 +3314,7 @@ function InfCodes() {
 
 					while (k < (j)) {
 						if (n !== 0)
-							r = Z_OK;
+							r = Z_OK$1;
 						else {
 
 							s.bitb = b;
@@ -3321,7 +3349,7 @@ function InfCodes() {
 					}
 					mode = BADCODE; // invalid code
 					z.msg = "invalid distance code";
-					r = Z_DATA_ERROR;
+					r = Z_DATA_ERROR$1;
 
 					s.bitb = b;
 					s.bitk = k;
@@ -3336,7 +3364,7 @@ function InfCodes() {
 
 					while (k < (j)) {
 						if (n !== 0)
-							r = Z_OK;
+							r = Z_OK$1;
 						else {
 
 							s.bitb = b;
@@ -3430,7 +3458,7 @@ function InfCodes() {
 							}
 						}
 					}
-					r = Z_OK;
+					r = Z_OK$1;
 
 					s.window[q++] = /* (byte) */lit;
 					m--;
@@ -3461,7 +3489,7 @@ function InfCodes() {
 					mode = END;
 				/* falls through */
 				case END:
-					r = Z_STREAM_END;
+					r = Z_STREAM_END$1;
 					s.bitb = b;
 					s.bitk = k;
 					z.avail_in = n;
@@ -3472,7 +3500,7 @@ function InfCodes() {
 
 				case BADCODE: // x: got error
 
-					r = Z_DATA_ERROR;
+					r = Z_DATA_ERROR$1;
 
 					s.bitb = b;
 					s.bitk = k;
@@ -3483,7 +3511,7 @@ function InfCodes() {
 					return s.inflate_flush(z, r);
 
 				default:
-					r = Z_STREAM_ERROR;
+					r = Z_STREAM_ERROR$1;
 
 					s.bitb = b;
 					s.bitk = k;
@@ -3510,7 +3538,7 @@ const border = [ // Order of the bit length code lengths
 
 const TYPE = 0; // get type bits (3, including end bit)
 const LENS = 1; // get lengths for stored
-const STORED = 2;// processing stored block
+const STORED$1 = 2;// processing stored block
 const TABLE = 3; // get table lengths
 const BTREE = 4; // get bit lengths tree for a dynamic
 // block
@@ -3579,8 +3607,8 @@ function InfBlocks(z, w) {
 		n = /* (int) */((q <= that.write ? that.write : that.end) - q);
 		if (n > z.avail_out)
 			n = z.avail_out;
-		if (n !== 0 && r == Z_BUF_ERROR)
-			r = Z_OK;
+		if (n !== 0 && r == Z_BUF_ERROR$1)
+			r = Z_OK$1;
 
 		// update counters
 		z.avail_out -= n;
@@ -3602,8 +3630,8 @@ function InfBlocks(z, w) {
 			n = that.write - q;
 			if (n > z.avail_out)
 				n = z.avail_out;
-			if (n !== 0 && r == Z_BUF_ERROR)
-				r = Z_OK;
+			if (n !== 0 && r == Z_BUF_ERROR$1)
+				r = Z_OK$1;
 
 			// update counters
 			z.avail_out -= n;
@@ -3656,7 +3684,7 @@ function InfBlocks(z, w) {
 
 					while (k < (3)) {
 						if (n !== 0) {
-							r = Z_OK;
+							r = Z_OK$1;
 						} else {
 							that.bitb = b;
 							that.bitk = k;
@@ -3722,7 +3750,7 @@ function InfBlocks(z, w) {
 							// }
 							mode = BADBLOCKS;
 							z.msg = "invalid block type";
-							r = Z_DATA_ERROR;
+							r = Z_DATA_ERROR$1;
 
 							that.bitb = b;
 							that.bitk = k;
@@ -3737,7 +3765,7 @@ function InfBlocks(z, w) {
 
 					while (k < (32)) {
 						if (n !== 0) {
-							r = Z_OK;
+							r = Z_OK$1;
 						} else {
 							that.bitb = b;
 							that.bitk = k;
@@ -3755,7 +3783,7 @@ function InfBlocks(z, w) {
 					if ((((~b) >>> 16) & 0xffff) != (b & 0xffff)) {
 						mode = BADBLOCKS;
 						z.msg = "invalid stored block lengths";
-						r = Z_DATA_ERROR;
+						r = Z_DATA_ERROR$1;
 
 						that.bitb = b;
 						that.bitk = k;
@@ -3767,9 +3795,9 @@ function InfBlocks(z, w) {
 					}
 					left = (b & 0xffff);
 					b = k = 0; // dump bits
-					mode = left !== 0 ? STORED : (last !== 0 ? DRY : TYPE);
+					mode = left !== 0 ? STORED$1 : (last !== 0 ? DRY : TYPE);
 					break;
-				case STORED:
+				case STORED$1:
 					if (n === 0) {
 						that.bitb = b;
 						that.bitk = k;
@@ -3805,7 +3833,7 @@ function InfBlocks(z, w) {
 							}
 						}
 					}
-					r = Z_OK;
+					r = Z_OK$1;
 
 					t = left;
 					if (t > n)
@@ -3825,7 +3853,7 @@ function InfBlocks(z, w) {
 
 					while (k < (14)) {
 						if (n !== 0) {
-							r = Z_OK;
+							r = Z_OK$1;
 						} else {
 							that.bitb = b;
 							that.bitk = k;
@@ -3845,7 +3873,7 @@ function InfBlocks(z, w) {
 					if ((t & 0x1f) > 29 || ((t >> 5) & 0x1f) > 29) {
 						mode = BADBLOCKS;
 						z.msg = "too many length or distance symbols";
-						r = Z_DATA_ERROR;
+						r = Z_DATA_ERROR$1;
 
 						that.bitb = b;
 						that.bitk = k;
@@ -3876,7 +3904,7 @@ function InfBlocks(z, w) {
 					while (index < 4 + (table >>> 10)) {
 						while (k < (3)) {
 							if (n !== 0) {
-								r = Z_OK;
+								r = Z_OK$1;
 							} else {
 								that.bitb = b;
 								that.bitk = k;
@@ -3905,9 +3933,9 @@ function InfBlocks(z, w) {
 
 					bb[0] = 7;
 					t = inftree.inflate_trees_bits(blens, bb, tb, hufts, z);
-					if (t != Z_OK) {
+					if (t != Z_OK$1) {
 						r = t;
-						if (r == Z_DATA_ERROR) {
+						if (r == Z_DATA_ERROR$1) {
 							blens = null;
 							mode = BADBLOCKS;
 						}
@@ -3938,7 +3966,7 @@ function InfBlocks(z, w) {
 
 						while (k < (t)) {
 							if (n !== 0) {
-								r = Z_OK;
+								r = Z_OK$1;
 							} else {
 								that.bitb = b;
 								that.bitk = k;
@@ -3970,7 +3998,7 @@ function InfBlocks(z, w) {
 
 							while (k < (t + i)) {
 								if (n !== 0) {
-									r = Z_OK;
+									r = Z_OK$1;
 								} else {
 									that.bitb = b;
 									that.bitk = k;
@@ -3999,7 +4027,7 @@ function InfBlocks(z, w) {
 								blens = null;
 								mode = BADBLOCKS;
 								z.msg = "invalid bit length repeat";
-								r = Z_DATA_ERROR;
+								r = Z_DATA_ERROR$1;
 
 								that.bitb = b;
 								that.bitk = k;
@@ -4030,8 +4058,8 @@ function InfBlocks(z, w) {
 					t = table;
 					t = inftree.inflate_trees_dynamic(257 + (t & 0x1f), 1 + ((t >> 5) & 0x1f), blens, bl_, bd_, tl_, td_, hufts, z);
 
-					if (t != Z_OK) {
-						if (t == Z_DATA_ERROR) {
+					if (t != Z_OK$1) {
+						if (t == Z_DATA_ERROR$1) {
 							blens = null;
 							mode = BADBLOCKS;
 						}
@@ -4057,10 +4085,10 @@ function InfBlocks(z, w) {
 					z.next_in_index = p;
 					that.write = q;
 
-					if ((r = codes.proc(that, z, r)) != Z_STREAM_END) {
+					if ((r = codes.proc(that, z, r)) != Z_STREAM_END$1) {
 						return that.inflate_flush(z, r);
 					}
-					r = Z_OK;
+					r = Z_OK$1;
 					codes.free(z);
 
 					p = z.next_in_index;
@@ -4093,7 +4121,7 @@ function InfBlocks(z, w) {
 					mode = DONELOCKS;
 				/* falls through */
 				case DONELOCKS:
-					r = Z_STREAM_END;
+					r = Z_STREAM_END$1;
 
 					that.bitb = b;
 					that.bitk = k;
@@ -4103,7 +4131,7 @@ function InfBlocks(z, w) {
 					that.write = q;
 					return that.inflate_flush(z, r);
 				case BADBLOCKS:
-					r = Z_DATA_ERROR;
+					r = Z_DATA_ERROR$1;
 
 					that.bitb = b;
 					that.bitk = k;
@@ -4114,7 +4142,7 @@ function InfBlocks(z, w) {
 					return that.inflate_flush(z, r);
 
 				default:
-					r = Z_STREAM_ERROR;
+					r = Z_STREAM_ERROR$1;
 
 					that.bitb = b;
 					that.bitk = k;
@@ -4150,9 +4178,9 @@ function InfBlocks(z, w) {
 // Inflate
 
 // preset dictionary flag in zlib header
-const PRESET_DICT = 0x20;
+const PRESET_DICT$1 = 0x20;
 
-const Z_DEFLATED = 8;
+const Z_DEFLATED$1 = 8;
 
 const METHOD = 0; // waiting for method byte
 const FLAG = 1; // waiting for flag byte
@@ -4167,7 +4195,7 @@ const BAD = 13; // got an error--stay here
 
 const mark = [0, 0, 0xff, 0xff];
 
-function Inflate$1() {
+function Inflate() {
 	const that = this;
 
 	that.mode = 0; // current inflate mode
@@ -4189,13 +4217,13 @@ function Inflate$1() {
 
 	function inflateReset(z) {
 		if (!z || !z.istate)
-			return Z_STREAM_ERROR;
+			return Z_STREAM_ERROR$1;
 
 		z.total_in = z.total_out = 0;
 		z.msg = null;
 		z.istate.mode = BLOCKS;
 		z.istate.blocks.reset(z, null);
-		return Z_OK;
+		return Z_OK$1;
 	}
 
 	that.inflateEnd = function (z) {
@@ -4203,7 +4231,7 @@ function Inflate$1() {
 			that.blocks.free(z);
 		that.blocks = null;
 		// ZFREE(z, z->state);
-		return Z_OK;
+		return Z_OK$1;
 	};
 
 	that.inflateInit = function (z, w) {
@@ -4213,7 +4241,7 @@ function Inflate$1() {
 		// set window size
 		if (w < 8 || w > 15) {
 			that.inflateEnd(z);
-			return Z_STREAM_ERROR;
+			return Z_STREAM_ERROR$1;
 		}
 		that.wbits = w;
 
@@ -4221,7 +4249,7 @@ function Inflate$1() {
 
 		// reset state
 		inflateReset(z);
-		return Z_OK;
+		return Z_OK$1;
 	};
 
 	that.inflate = function (z, f) {
@@ -4229,10 +4257,10 @@ function Inflate$1() {
 		let b;
 
 		if (!z || !z.istate || !z.next_in)
-			return Z_STREAM_ERROR;
+			return Z_STREAM_ERROR$1;
 		const istate = z.istate;
-		f = f == Z_FINISH ? Z_BUF_ERROR : Z_OK;
-		r = Z_BUF_ERROR;
+		f = f == Z_FINISH$1 ? Z_BUF_ERROR$1 : Z_OK$1;
+		r = Z_BUF_ERROR$1;
 		// eslint-disable-next-line no-constant-condition
 		while (true) {
 			switch (istate.mode) {
@@ -4244,7 +4272,7 @@ function Inflate$1() {
 
 					z.avail_in--;
 					z.total_in++;
-					if (((istate.method = z.read_byte(z.next_in_index++)) & 0xf) != Z_DEFLATED) {
+					if (((istate.method = z.read_byte(z.next_in_index++)) & 0xf) != Z_DEFLATED$1) {
 						istate.mode = BAD;
 						z.msg = "unknown compression method";
 						istate.marker = 5; // can't try inflateSync
@@ -4275,7 +4303,7 @@ function Inflate$1() {
 						break;
 					}
 
-					if ((b & PRESET_DICT) === 0) {
+					if ((b & PRESET_DICT$1) === 0) {
 						istate.mode = BLOCKS;
 						break;
 					}
@@ -4324,24 +4352,24 @@ function Inflate$1() {
 					z.total_in++;
 					istate.need += (z.read_byte(z.next_in_index++) & 0xff);
 					istate.mode = DICT0;
-					return Z_NEED_DICT;
+					return Z_NEED_DICT$1;
 				case DICT0:
 					istate.mode = BAD;
 					z.msg = "need dictionary";
 					istate.marker = 0; // can try inflateSync
-					return Z_STREAM_ERROR;
+					return Z_STREAM_ERROR$1;
 				case BLOCKS:
 
 					r = istate.blocks.proc(z, r);
-					if (r == Z_DATA_ERROR) {
+					if (r == Z_DATA_ERROR$1) {
 						istate.mode = BAD;
 						istate.marker = 0; // can try inflateSync
 						break;
 					}
-					if (r == Z_OK) {
+					if (r == Z_OK$1) {
 						r = f;
 					}
-					if (r != Z_STREAM_END) {
+					if (r != Z_STREAM_END$1) {
 						return r;
 					}
 					r = f;
@@ -4349,11 +4377,11 @@ function Inflate$1() {
 					istate.mode = DONE;
 				/* falls through */
 				case DONE:
-					return Z_STREAM_END;
+					return Z_STREAM_END$1;
 				case BAD:
-					return Z_DATA_ERROR;
+					return Z_DATA_ERROR$1;
 				default:
-					return Z_STREAM_ERROR;
+					return Z_STREAM_ERROR$1;
 			}
 		}
 	};
@@ -4361,7 +4389,7 @@ function Inflate$1() {
 	that.inflateSetDictionary = function (z, dictionary, dictLength) {
 		let index = 0, length = dictLength;
 		if (!z || !z.istate || z.istate.mode != DICT0)
-			return Z_STREAM_ERROR;
+			return Z_STREAM_ERROR$1;
 		const istate = z.istate;
 		if (length >= (1 << istate.wbits)) {
 			length = (1 << istate.wbits) - 1;
@@ -4369,7 +4397,7 @@ function Inflate$1() {
 		}
 		istate.blocks.set_dictionary(dictionary, index, length);
 		istate.mode = BLOCKS;
-		return Z_OK;
+		return Z_OK$1;
 	};
 
 	that.inflateSync = function (z) {
@@ -4380,14 +4408,14 @@ function Inflate$1() {
 
 		// set up
 		if (!z || !z.istate)
-			return Z_STREAM_ERROR;
+			return Z_STREAM_ERROR$1;
 		const istate = z.istate;
 		if (istate.mode != BAD) {
 			istate.mode = BAD;
 			istate.marker = 0;
 		}
 		if ((n = z.avail_in) === 0)
-			return Z_BUF_ERROR;
+			return Z_BUF_ERROR$1;
 		p = z.next_in_index;
 		m = istate.marker;
 
@@ -4412,7 +4440,7 @@ function Inflate$1() {
 
 		// return no joy or set up to restart on a new block
 		if (m != 4) {
-			return Z_DATA_ERROR;
+			return Z_DATA_ERROR$1;
 		}
 		r = z.total_in;
 		w = z.total_out;
@@ -4420,7 +4448,7 @@ function Inflate$1() {
 		z.total_in = r;
 		z.total_out = w;
 		istate.mode = BLOCKS;
-		return Z_OK;
+		return Z_OK$1;
 	};
 
 	// Returns true if inflate is currently at the end of a block generated
@@ -4432,36 +4460,36 @@ function Inflate$1() {
 	// waiting for these length bytes.
 	that.inflateSyncPoint = function (z) {
 		if (!z || !z.istate || !z.istate.blocks)
-			return Z_STREAM_ERROR;
+			return Z_STREAM_ERROR$1;
 		return z.istate.blocks.sync_point();
 	};
 }
 
 // ZStream
 
-function ZStream() {
+function ZStream$1() {
 }
 
-ZStream.prototype = {
+ZStream$1.prototype = {
 	inflateInit: function (bits) {
 		const that = this;
-		that.istate = new Inflate$1();
+		that.istate = new Inflate();
 		if (!bits)
-			bits = MAX_BITS;
+			bits = MAX_BITS$1;
 		return that.istate.inflateInit(that, bits);
 	},
 
 	inflate: function (f) {
 		const that = this;
 		if (!that.istate)
-			return Z_STREAM_ERROR;
+			return Z_STREAM_ERROR$1;
 		return that.istate.inflate(that, f);
 	},
 
 	inflateEnd: function () {
 		const that = this;
 		if (!that.istate)
-			return Z_STREAM_ERROR;
+			return Z_STREAM_ERROR$1;
 		const ret = that.istate.inflateEnd(that);
 		that.istate = null;
 		return ret;
@@ -4470,13 +4498,13 @@ ZStream.prototype = {
 	inflateSync: function () {
 		const that = this;
 		if (!that.istate)
-			return Z_STREAM_ERROR;
+			return Z_STREAM_ERROR$1;
 		return that.istate.inflateSync(that);
 	},
 	inflateSetDictionary: function (dictionary, dictLength) {
 		const that = this;
 		if (!that.istate)
-			return Z_STREAM_ERROR;
+			return Z_STREAM_ERROR$1;
 		return that.istate.inflateSetDictionary(that, dictionary, dictLength);
 	},
 	read_byte: function (start) {
@@ -4493,9 +4521,9 @@ ZStream.prototype = {
 
 function ZipInflate(options) {
 	const that = this;
-	const z = new ZStream();
+	const z = new ZStream$1();
 	const bufsize = options && options.chunkSize ? Math.floor(options.chunkSize * 2) : 128 * 1024;
-	const flush = Z_NO_FLUSH;
+	const flush = Z_NO_FLUSH$1;
 	const buf = new Uint8Array(bufsize);
 	let nomoreinput = false;
 
@@ -4518,12 +4546,12 @@ function ZipInflate(options) {
 				nomoreinput = true;
 			}
 			err = z.inflate(flush);
-			if (nomoreinput && (err === Z_BUF_ERROR)) {
+			if (nomoreinput && (err === Z_BUF_ERROR$1)) {
 				if (z.avail_in !== 0)
 					throw new Error("inflating: bad input");
-			} else if (err !== Z_OK && err !== Z_STREAM_END)
+			} else if (err !== Z_OK$1 && err !== Z_STREAM_END$1)
 				throw new Error("inflating: " + z.msg);
-			if ((nomoreinput || err === Z_STREAM_END) && (z.avail_in === data.length))
+			if ((nomoreinput || err === Z_STREAM_END$1) && (z.avail_in === data.length))
 				throw new Error("inflating: bad input");
 			if (z.next_out_index)
 				if (z.next_out_index === bufsize)
@@ -4659,7 +4687,7 @@ function configure(configuration) {
  EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-const table$1 = {
+const table = {
 	"application": {
 		"andrew-inset": "ez",
 		"annodex": "anx",
@@ -5607,13 +5635,13 @@ const table$1 = {
 
 (() => {
 	const mimeTypes = {};
-	for (let type in table$1) {
+	for (let type in table) {
 		// eslint-disable-next-line no-prototype-builtins
-		if (table$1.hasOwnProperty(type)) {
-			for (let subtype in table$1[type]) {
+		if (table.hasOwnProperty(type)) {
+			for (let subtype in table[type]) {
 				// eslint-disable-next-line no-prototype-builtins
-				if (table$1[type].hasOwnProperty(subtype)) {
-					const value = table$1[type][subtype];
+				if (table[type].hasOwnProperty(subtype)) {
+					const value = table[type][subtype];
 					if (typeof value == "string") {
 						mimeTypes[value] = type + "/" + subtype;
 					} else {
@@ -5864,7 +5892,7 @@ var decodeCP437 = stringValue => {
  EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-const table = [];
+const table$1 = [];
 for (let i = 0; i < 256; i++) {
 	let t = i;
 	for (let j = 0; j < 8; j++) {
@@ -5874,7 +5902,7 @@ for (let i = 0; i < 256; i++) {
 			t = t >>> 1;
 		}
 	}
-	table[i] = t;
+	table$1[i] = t;
 }
 
 class Crc32 {
@@ -5886,7 +5914,7 @@ class Crc32 {
 	append(data) {
 		let crc = this.crc | 0;
 		for (let offset = 0, length = data.length | 0; offset < length; offset++) {
-			crc = (crc >>> 8) ^ table[(crc ^ data[offset]) & 0xFF];
+			crc = (crc >>> 8) ^ table$1[(crc ^ data[offset]) & 0xFF];
 		}
 		this.crc = crc;
 	}
@@ -6792,7 +6820,7 @@ function append(aesCrypto, input, output, paddingStart, paddingEnd, verifySignat
 }
 
 async function createDecryptionKeys(decrypt, preambleArray, password) {
-	await createKeys$1(decrypt, password, subarray(preambleArray, 0, SALT_LENGTH[decrypt.strength]));
+	await createKeys(decrypt, password, subarray(preambleArray, 0, SALT_LENGTH[decrypt.strength]));
 	const passwordVerification = subarray(preambleArray, SALT_LENGTH[decrypt.strength]);
 	const passwordVerificationKey = decrypt.keys.passwordVerification;
 	if (passwordVerificationKey[0] != passwordVerification[0] || passwordVerificationKey[1] != passwordVerification[1]) {
@@ -6802,11 +6830,11 @@ async function createDecryptionKeys(decrypt, preambleArray, password) {
 
 async function createEncryptionKeys(encrypt, password) {
 	const salt = crypto.getRandomValues(new Uint8Array(SALT_LENGTH[encrypt.strength]));
-	await createKeys$1(encrypt, password, salt);
+	await createKeys(encrypt, password, salt);
 	return concat(salt, encrypt.keys.passwordVerification);
 }
 
-async function createKeys$1(target, password, salt) {
+async function createKeys(target, password, salt) {
 	const encodedPassword = (new TextEncoder()).encode(password);
 	const basekey = await subtle.importKey(RAW_FORMAT, encodedPassword, BASE_KEY_ALGORITHM, false, DERIVED_BITS_USAGE);
 	const derivedBits = await subtle.deriveBits(Object.assign({ salt }, DERIVED_BITS_ALGORITHM), basekey, 8 * ((KEY_LENGTH[target.strength] * 2) + 2));
@@ -6879,7 +6907,7 @@ class ZipCryptoDecrypt {
 			password,
 			passwordVerification
 		});
-		createKeys(zipCrypto, password);
+		createKeys$1(zipCrypto, password);
 	}
 
 	async append(input) {
@@ -6911,7 +6939,7 @@ class ZipCryptoEncrypt {
 			password,
 			passwordVerification
 		});
-		createKeys(zipCrypto, password);
+		createKeys$1(zipCrypto, password);
 	}
 
 	async append(input) {
@@ -6958,7 +6986,7 @@ function encrypt(target, input) {
 	return output;
 }
 
-function createKeys(target, password) {
+function createKeys$1(target, password) {
 	target.keys = [0x12345678, 0x23456789, 0x34567890];
 	target.crcKey0 = new Crc32(target.keys[0]);
 	target.crcKey2 = new Crc32(target.keys[2]);
@@ -7021,7 +7049,7 @@ const CODEC_DEFLATE = "deflate";
 const CODEC_INFLATE = "inflate";
 const ERR_INVALID_SIGNATURE = "Invalid signature";
 
-class Inflate {
+class Inflate$1 {
 
 	constructor(codecConstructor, {
 		signature,
@@ -7088,7 +7116,7 @@ class Inflate {
 	}
 }
 
-class Deflate {
+class Deflate$1 {
 
 	constructor(codecConstructor, {
 		encrypted,
@@ -7151,11 +7179,11 @@ class Deflate {
 	}
 }
 
-function createCodec$1(codecConstructor, options, config) {
+function createCodec(codecConstructor, options, config) {
 	if (options.codecType.startsWith(CODEC_DEFLATE)) {
-		return new Deflate(codecConstructor, options, config);
+		return new Deflate$1(codecConstructor, options, config);
 	} else if (options.codecType.startsWith(CODEC_INFLATE)) {
-		return new Inflate(codecConstructor, options, config);
+		return new Inflate$1(codecConstructor, options, config);
 	}
 }
 
@@ -7211,7 +7239,7 @@ var getWorker = (workerData, codecConstructor, options, config, onTaskFinished, 
 };
 
 function createWorkerInterface(workerData, config) {
-	const interfaceCodec = createCodec$1(workerData.codecConstructor, workerData.options, config);
+	const interfaceCodec = createCodec(workerData.codecConstructor, workerData.options, config);
 	return {
 		async append(data) {
 			try {
@@ -7334,7 +7362,7 @@ function createWebWorkerInterface(workerData, config) {
 let pool = [];
 let pendingRequests = [];
 
-function createCodec(codecConstructor, options, config) {
+function createCodec$1(codecConstructor, options, config) {
 	const streamCopy = !options.compressed && !options.signed && !options.encrypted;
 	const webWorker = !streamCopy && (options.useWebWorkers || (options.useWebWorkers === undefined && config.useWebWorkers));
 	const scripts = webWorker && config.workerScripts ? config.workerScripts[options.codecType] : [];
@@ -7687,7 +7715,7 @@ class ZipEntry {
 				throw new Error(ERR_ENCRYPTED);
 			}
 		}
-		const codec = await createCodec(config.Inflate, {
+		const codec = await createCodec$1(config.Inflate, {
 			codecType: CODEC_INFLATE,
 			password,
 			zipCrypto,
@@ -8463,7 +8491,7 @@ class FastbootDevice {
             let resp = (await this.getVariable("max-download-size")).toLowerCase();
             if (resp) {
                 // AOSP fastboot requires hex
-                return Math.min(parseInt(resp, 16), MAX_DOWNLOAD_SIZE);
+                return Math.min(parseInt(resp, 10), MAX_DOWNLOAD_SIZE);
             }
         }
         catch (error) {
@@ -8517,7 +8545,7 @@ class FastbootDevice {
         }
         let downloadSize = parseInt(downloadResp.dataSize, 16);
         if (downloadSize !== buffer.byteLength) {
-            throw new FastbootError("FAIL", `Bootloader wants ${buffer.byteLength} bytes, requested to send ${buffer.byteLength} bytes`);
+            throw new FastbootError("FAIL", `Bootloader wants ${downloadSize} bytes, requested to send ${buffer.byteLength} bytes`);
         }
         logDebug(`Sending payload: ${buffer.byteLength} bytes`);
         await this._sendRawPayload(buffer, onProgress);
